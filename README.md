@@ -1,4 +1,6 @@
-tbd
+xASSEMBLEx
 ===
 
-A GraphX based assembler; name to be determined later. Apache 2 licensed.
+A [GraphX](https://spark.apache.org/docs/1.0.0/graphx-programming-guide.html)
+and [ADAM](https://www.github.com/bigdatagenomics/adam) based assembler. Apache
+2 licensed.
