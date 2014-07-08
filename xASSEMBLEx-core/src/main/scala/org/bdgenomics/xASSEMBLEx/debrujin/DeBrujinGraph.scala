@@ -52,7 +52,8 @@ object DeBrujinGraph {
 
     // build graph, and filter out edges without nodes on both ends
     new DeBrujinGraph(Graph(vertices, edges)
-      .subgraph(et => et.srcAttr != null && et.dstAttr != null))
+      .subgraph(et => et.srcAttr != null && et.dstAttr != null,
+        (vid: Long, v: MergedQmer) => v != null))
   }
 }
 
@@ -89,7 +90,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
     case class LabelingMessage(id: List[Long],
                                score: List[Double],
                                messageSender: List[Long],
-                               rank: List[Int]) extends Serializable {
+                               rank: List[Int],
+                               isUpdate: List[Boolean]) extends Serializable {
       assert(id.length == score.length && id.length == messageSender.length,
         "Input lists must all be the same length")
 
@@ -103,7 +105,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         LabelingMessage(id ::: msg.id,
           score ::: msg.score,
           messageSender ::: msg.messageSender,
-          rank ::: msg.rank)
+          rank ::: msg.rank,
+          isUpdate ::: msg.isUpdate)
       }
     }
 
@@ -128,6 +131,12 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       }
     }
 
+    case class IdMessage(ids: Seq[(Long, Long)]) {
+      def merge(msg: IdMessage): IdMessage = {
+        IdMessage(ids ++ msg.ids)
+      }
+    }
+
     /**
      * Message passed when labeling nodes that are OK to receive messages from.
      *
@@ -146,6 +155,10 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       }
 
       override def toString(): String = id.toString
+    }
+
+    def fpEquals(a: Double, b: Double): Boolean = {
+      abs(a - b) < 1e-6
     }
 
     /**
@@ -171,6 +184,7 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
                                     score: Iterator[Double],
                                     sender: Iterator[Long],
                                     rank: Iterator[Int],
+                                    isUpdate: Iterator[Boolean],
                                     qmer: MergedQmer): MergedQmer = {
         // do we have more data?
         if (!id.hasNext) {
@@ -180,15 +194,18 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
           val nScore = score.next
           val nSender = sender.next
           val nRank = rank.next
-
-          val msg = "qmer " + vid + "/" + cScore + " in " + cId + " received (" + nId + "," + nScore + ") from " + nSender
+          val nUpdate = isUpdate.next
 
           // if we can accept a message from this sender, and it has a better score
           // than our current score, we update
-          val nQmer = qmer.setContig(nId, nScore, nRank)
+          val nQmer = if (nUpdate) {
+            qmer.setContig(nId, nScore, nRank)
+          } else {
+            qmer.updateAdjacentContig(nSender, nId)
+          }
 
           // call recursively
-          updateIfAccepted(id, score, sender, rank, nQmer)
+          updateIfAccepted(id, score, sender, rank, isUpdate, nQmer)
         }
       }
 
@@ -197,6 +214,7 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         msg.score.toIterator,
         msg.messageSender.toIterator,
         msg.rank.toIterator,
+        msg.isUpdate.toIterator,
         qmer)
     }
 
@@ -209,12 +227,9 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
      * messages to, as well as the messages.
      */
     def sendMessage(et: EdgeTriplet[MergedQmer, QmerAdjacency]): Iterator[(VertexId, LabelingMessage)] = {
-      def fpEquals(a: Double, b: Double): Boolean = {
-        abs(a - b) < 1e-6
-      }
-
-      // if we can't send messages to each other, let's not
-      if (et.attr.sendOnEdge) {
+      // if we can't send messages to each other, and we're not out of date, let's not
+      if (!et.dstAttr.canAcceptMessageFrom(et.srcId) ||
+        !et.srcAttr.canAcceptMessageFrom(et.dstId)) {
         return Iterator()
       }
 
@@ -256,7 +271,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       Iterator((recepientVertexId, LabelingMessage(List(contigId),
         List(contigScore),
         List(senderId),
-        List(recipientRank))))
+        List(recipientRank),
+        List(true))))
     }
 
     // run two iterations of pregel to find allowable id's
@@ -273,23 +289,25 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         Iterator((et.srcId, AdjacencyMessage(et.dstId)))
       }, _.merge(_))
 
-    // map over edge triplets
-    val finalGraph = outGraph.mapTriplets((_, iter) => iter.map(et => {
-      if (et.dstAttr != null && et.dstAttr.receiveIn.isDefined) {
-        QmerAdjacency(et.attr.readsCovering,
-          true)
-      } else {
-        QmerAdjacency(et.attr.readsCovering,
-          false)
-      }
-    }))
-
     // pregel the graph up for some old school contiggin' action
-    Pregel[MergedQmer, QmerAdjacency, LabelingMessage](finalGraph, LabelingMessage(List(),
+    val labelGraph = Pregel[MergedQmer, QmerAdjacency, LabelingMessage](outGraph, LabelingMessage(List(),
       List(),
       List(),
-      List()))(
-      updateQmers, sendMessage, _.merge(_))
+      List(),
+      List()))(updateQmers, sendMessage, _.merge(_))
+
+    // send label updates
+    Pregel[MergedQmer, QmerAdjacency, IdMessage](labelGraph, IdMessage(Seq()), 1)(
+      (vid: VertexId, qmer: MergedQmer, msg: IdMessage) => {
+        MergedQmer.update(qmer, msg.ids.toMap)
+      }, (et: EdgeTriplet[MergedQmer, QmerAdjacency]) => {
+        if (!et.dstAttr.canAcceptMessageFrom(et.srcId) || !et.srcAttr.canAcceptMessageFrom(et.dstId)) {
+          Iterator((et.srcId, IdMessage(Seq((et.dstId, et.dstAttr.contigId)))),
+            (et.dstId, IdMessage(Seq((et.srcId, et.srcAttr.contigId)))))
+        } else {
+          Iterator()
+        }
+      }, _.merge(_))
   }
 
   /**
@@ -305,5 +323,23 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       .flatMap(kv => Option(kv._2))
       .groupBy(_.getContig._1)
       .map(kv => ContigBuilder(kv._1, kv._2))
+  }
+
+  def toDot(): String = {
+    labeledGraph.mapReduceTriplets(et => {
+      val term = if (et.dstAttr == null || et.dstAttr.receiveIn.isEmpty ||
+        et.srcAttr == null || et.srcAttr.receiveOut.isEmpty) {
+        "[ style = dotted ] ;\n"
+      } else {
+        " ;\n"
+      }
+
+      Iterator((et.srcId, et.srcId + " -> " + et.dstId + term))
+    }, (s1: String, s2: String) => s1 + s2)
+      .map(kv => kv._2)
+      .reduce(_ + _) + labeledGraph.vertices
+      .filter(kv => kv._2 != null)
+      .map(kv => kv._2.toDot)
+      .reduce(_ + "\n" + _)
   }
 }

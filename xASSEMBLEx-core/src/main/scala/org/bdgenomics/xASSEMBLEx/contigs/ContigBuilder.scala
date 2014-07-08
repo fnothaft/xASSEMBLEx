@@ -49,7 +49,7 @@ object ContigBuilder extends Serializable {
         // do we only have one possible continuation? if so, recurse, else return
         if (qmer.next.length != 1) {
           assert(!iter.hasNext,
-            "We should have run out of q-mers, but we have not.")
+            "We should have run out of q-mers (at " + qmer.id + "), but we have not. Out: " + qmer.receiveOut + " In: " + qmer.receiveIn)
 
           // we've been building our string in reverse, so we need to reverse now
           cl.reverse

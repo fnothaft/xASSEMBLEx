@@ -17,6 +17,8 @@
  */
 package org.bdgenomics.xASSEMBLEx.contig
 
+import org.apache.spark.rdd.RDD
+import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.util.SparkFunSuite
 import org.bdgenomics.formats.avro.ADAMRecord
 import org.bdgenomics.xASSEMBLEx.debrujin.{ DeBrujinGraph, MergedQmer }
@@ -39,6 +41,69 @@ class ContigBuilderSuite extends SparkFunSuite {
 
     assert(contigRdd.count === 1)
     assert(contigRdd.first.fragment === readSequence)
+  }
+
+  sparkTest("reconstruct two distinct reads into separate contigs") {
+    val readSequence1 = "ACCCTGCGGCTCA"
+    val readSequence2 = "CACCACTGCGATT"
+
+    val read1 = ADAMRecord.newBuilder()
+      .setSequence(readSequence1)
+      .setQual(".............")
+      .build()
+    val read2 = ADAMRecord.newBuilder()
+      .setSequence(readSequence2)
+      .setQual(".............")
+      .build()
+
+    val qmerRdd = ProcessReads(sc.parallelize(Seq(read1, read2)), 7)
+
+    val graph = DeBrujinGraph(qmerRdd)
+    val contigRdd = graph.buildContigs()
+
+    assert(contigRdd.count === 2)
+    assert(contigRdd.filter(_.fragment == readSequence1).count === 1)
+    assert(contigRdd.filter(_.fragment == readSequence2).count === 1)
+  }
+
+  sparkTest("reconstruct three overlapping reads into a single contig") {
+    val readSequence1 = "ACCCTGCGGCTCA"
+    val readSequence2 = "CGGCTCACATTAT"
+    val readSequence3 = "ACATTATTTACAC"
+
+    val read1 = ADAMRecord.newBuilder()
+      .setSequence(readSequence1)
+      .setQual(".............")
+      .build()
+    val read2 = ADAMRecord.newBuilder()
+      .setSequence(readSequence2)
+      .setQual(".............")
+      .build()
+    val read3 = ADAMRecord.newBuilder()
+      .setSequence(readSequence3)
+      .setQual(".............")
+      .build()
+
+    val qmerRdd = ProcessReads(sc.parallelize(Seq(read1, read2, read3)), 7)
+
+    val graph = DeBrujinGraph(qmerRdd)
+    val contigRdd = graph.buildContigs()
+
+    assert(contigRdd.count === 1)
+    assert(contigRdd.first.fragment === "ACCCTGCGGCTCACATTATTTACAC")
+  }
+
+  sparkTest("reconstruct a messy tangle of reads") {
+
+    val path = ClassLoader.getSystemClassLoader.getResource("NA12878_snp_A2G_chr20_225058.sam").getFile
+    val rdd: RDD[ADAMRecord] = sc.adamLoad(path)
+
+    val qmerRdd = ProcessReads(rdd, 30)
+
+    val graph = DeBrujinGraph(qmerRdd)
+    val contigRdd = graph.buildContigs()
+
+    assert(contigRdd.count === 50)
   }
 
 }

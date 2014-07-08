@@ -30,5 +30,11 @@ case class IntermediateContig(id: Long,
                               fragment: String,
                               headAdjacentContigs: Iterable[Long],
                               tailAdjacentContigs: Iterable[Long]) {
+
+  def toDot(): String = {
+    id + " [\nlabel = \"" + fragment + "\"\nshape = box\n];\n" + headAdjacentContigs.map(l => {
+      id + " -> " + l + ";\n"
+    }).fold("")(_ + _)
+  }
 }
 
