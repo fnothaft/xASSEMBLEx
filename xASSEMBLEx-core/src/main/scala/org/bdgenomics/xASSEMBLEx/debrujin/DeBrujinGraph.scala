@@ -17,6 +17,7 @@
  */
 package org.bdgenomics.xASSEMBLEx.debrujin
 
+import org.apache.spark.Logging
 import org.apache.spark.graphx.{
   Edge,
   EdgeDirection,
@@ -26,6 +27,7 @@ import org.apache.spark.graphx.{
   VertexId
 }
 import org.apache.spark.rdd.RDD
+import org.bdgenomics.xASSEMBLEx.contig.{ ContigBuilder, IntermediateContig }
 import scala.annotation.tailrec
 
 object DeBrujinGraph {
@@ -57,21 +59,22 @@ object DeBrujinGraph {
  * contigs. We do this by:
  *
  * - Using the Pregel API in GraphX to label all nodes as part of a contig.
+ * - Grouping all labeled qmers into intermediate contig fragments.
  *
- * @param graph 
+ * @param graph A graph of qmers with connectivity.
  */
-class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializable {
+class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializable with Logging {
 
   // have we labeled the nodes in this graph?
   lazy val labeledGraph = labelQmers()
-  
+
   /**
    * Label all q-mers with the ID of the contig that they belong to.
    *
    * @return Returns a labeled graph.
    */
   protected def labelQmers(): Graph[MergedQmer, QmerAdjacency] = {
-    
+
     /**
      * Message passed when labeling nodes with q-mer membership.
      *
@@ -83,7 +86,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
      */
     case class LabelingMessage(id: List[Long],
                                score: List[Double],
-                               messageSender: List[Long]) extends Serializable {
+                               messageSender: List[Long],
+                               rank: List[Int]) extends Serializable {
       assert(id.length == score.length && id.length == messageSender.length,
         "Input lists must all be the same length")
 
@@ -96,7 +100,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       def merge(msg: LabelingMessage): LabelingMessage = {
         LabelingMessage(id ::: msg.id,
           score ::: msg.score,
-          messageSender ::: msg.messageSender)
+          messageSender ::: msg.messageSender,
+          rank ::: msg.rank)
       }
     }
 
@@ -109,7 +114,7 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
 
       /**
        * Merges two messages together. Merging another message kills both messages.
-       * 
+       *
        * @param msg Message to merge.
        * @return Returns a new message.
        */
@@ -131,21 +136,28 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       @tailrec def updateIfAccepted(id: Iterator[Long],
                                     score: Iterator[Double],
                                     sender: Iterator[Long],
+                                    rank: Iterator[Int],
                                     qmer: MergedQmer) {
         // do we have more data?
         if (id.hasNext) {
           val nId = id.next
           val nScore = score.next
           val nSender = sender.next
+          val nRank = rank.next
 
           // if we can accept a message from this sender, and it has a better score
           // than our current score, we update
-          if (qmer.canAcceptMessageFrom(nSender) && qmer.getContig._2 < nScore) {
-            qmer.setContig(nId, nScore)
+          if (qmer.canAcceptMessageFrom(nSender)) {
+            if (qmer.getContig._2 < nScore) {
+              qmer.setContig(nId, nScore, nRank)
+            }
+          } else {
+            // update the adjacent contig mapping
+            qmer.updateAdjacentContig(nId, nSender)
           }
 
           // call recursively
-          updateIfAccepted(id, score, sender, qmer)
+          updateIfAccepted(id, score, sender, rank, qmer)
         }
       }
 
@@ -153,6 +165,7 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       updateIfAccepted(msg.id.toIterator,
         msg.score.toIterator,
         msg.messageSender.toIterator,
+        msg.rank.toIterator,
         qmer)
 
       // return our updated qmer
@@ -175,7 +188,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         val contig = et.srcAttr.getContig
         msgList = (et.dstId, LabelingMessage(List(contig._1),
           List(contig._2),
-          List(et.srcId))) :: msgList
+          List(et.srcId),
+          List(contig._3 - 1))) :: msgList
       }
 
       // did the sink get updated?
@@ -183,7 +197,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         val contig = et.dstAttr.getContig
         msgList = (et.srcId, LabelingMessage(List(contig._1),
           List(contig._2),
-          List(et.dstId))) :: msgList
+          List(et.dstId),
+          List(contig._3 + 1))) :: msgList
       }
 
       // convert to iterator and return
@@ -207,7 +222,25 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       }, _.merge(_))
 
     // pregel the graph up for some old school contiggin' action
-    Pregel[MergedQmer, QmerAdjacency, LabelingMessage](outGraph, LabelingMessage(List(), List(), List()))(
+    Pregel[MergedQmer, QmerAdjacency, LabelingMessage](outGraph, LabelingMessage(List(),
+      List(),
+      List(),
+      List()))(
       updateQmers, sendMessage, _.merge(_))
+  }
+
+  /**
+   * Connects labeled q-mers into contigs. If contigs have not yet been labeled,
+   * labels the q-mers.
+   *
+   * @return Returns an RDD of contigs.
+   *
+   * @see org.bdgenomics.xASSEMBLEx.contig.ContigBuilder
+   */
+  def buildContigs(): RDD[IntermediateContig] = {
+    labeledGraph.vertices
+      .map(kv => kv._2)
+      .groupBy(_.key)
+      .map(kv => ContigBuilder(kv._1, kv._2))
   }
 }

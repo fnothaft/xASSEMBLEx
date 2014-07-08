@@ -19,6 +19,7 @@ package org.bdgenomics.xASSEMBLEx.debrujin
 
 import org.apache.spark.graphx.Edge
 import org.bdgenomics.xASSEMBLEx.util.NucleotideSequenceHash
+import scala.collection.mutable.HashMap
 
 object MergedQmer {
 
@@ -102,8 +103,11 @@ class MergedQmer(val kmer: String,
   var contigId: Option[Long] = None
   var contigScore: Option[Double] = None
 
+  // the rank of this qmer in it's respective contig
+  var contigRank = 0
+
   // the id of this qmer
-  lazy val id = key()
+  lazy val id = generateKey()
 
   // the list of IDs we can receive messages from
   var receiveIn: Option[Long] = None
@@ -111,6 +115,28 @@ class MergedQmer(val kmer: String,
 
   // have we been updated this turn?
   var updated = false
+
+  // map of contigs we can connect to
+  val adjacentContigs = HashMap[Long, Long]()
+
+  /**
+   * Updates the adjacent contig map with a message from a sender.
+   *
+   * @param id Contig ID.
+   * @param sender Sender ID.
+   */
+  def updateAdjacentContig(id: Long, sender: Long) {
+    adjacentContigs(sender) = id
+  }
+
+  /**
+   * Returns the adjacent contigs that we can connect to.
+   *
+   * @return Returns a list of contig IDs.
+   */
+  def getAdjacentContigs(): Iterable[Long] = {
+    adjacentContigs.values
+  }
 
   /**
    * Has this qmer been added to a contig?
@@ -156,10 +182,12 @@ class MergedQmer(val kmer: String,
    * @note This function sets the updated flag.
    */
   def setContig(id: Long,
-                score: Double) {
+                score: Double,
+                rank: Int) {
     updated = true
     contigId = Some(id)
     contigScore = Some(score)
+    contigRank = rank
   }
 
   /**
@@ -182,14 +210,31 @@ class MergedQmer(val kmer: String,
   /**
    * Gets the contig ID and score of this qmer.
    *
-   * @return (ID, score) for the contig this qmer belongs to.
+   * @return (ID, score, rank) for the contig this qmer belongs to.
    *
    * @throws AssertionError Throws an assertion error if this qmer does not yet
    * belong to a contig.
    */
-  def getContig(): (Long, Double) = {
+  def getContig(): (Long, Double, Int) = {
     assert(contigId.isDefined, "Cannot get contig until qmer joins a contig")
-    (contigId.get, contigScore.get)
+    (contigId.get, contigScore.get, contigRank)
+  }
+
+  /**
+   * Gets the rank of this qmer in it's respective contig.
+   *
+   * @return Returns the rank of this qmer in it's respective contig.
+   */
+  def getRank(): Int = contigRank
+
+  /**
+   * Generates the ID of this q-mer, which is generated from the first 32 characters
+   * of the q-mer's k-mer.
+   *
+   * @return Returns the q-mer ID.
+   */
+  protected def generateKey(): Long = {
+    NucleotideSequenceHash.hashSequence(kmer)
   }
 
   /**
@@ -198,9 +243,7 @@ class MergedQmer(val kmer: String,
    *
    * @return Returns the q-mer ID.
    */
-  def key(): Long = {
-    NucleotideSequenceHash.hashSequence(kmer)
-  }
+  def key(): Long = id
 
   /**
    * Creates the edges connecting this qmer and all qmers near it that are
