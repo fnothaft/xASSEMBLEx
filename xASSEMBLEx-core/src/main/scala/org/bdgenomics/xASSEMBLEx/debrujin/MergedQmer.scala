@@ -75,13 +75,106 @@ object MergedQmer {
       .filter(t => t._2 != 0)
 
     // generate merged qmer
-    new MergedQmer(kmer,
+    MergedQmer(kmer,
       multiplicity,
       support,
       nextStats.map(t => t._1),
       nextStats.map(t => t._2),
       nextStats.map(t => t._3))
   }
+
+  /**
+   * Creates a new, previously untouched qmer.
+   *
+   * @param kmer K-base sequence.
+   * @param multiplicity The number of q-mers with this sequence.
+   * @param support Quality weight for this k-mer.
+   * @param next Edge to next k-mer.
+   * @param nextCount The number of links between stages.
+   * @param nextSupport Quality score supporting the edge.
+   */
+  def apply(kmer: String,
+            multiplicity: Int,
+            support: Double,
+            next: Array[Char],
+            nextCount: Array[Int],
+            nextSupport: Array[Double]): MergedQmer = {
+    val id = NucleotideSequenceHash.hashSequence(kmer)
+    new MergedQmer(id,
+      kmer,
+      multiplicity,
+      support,
+      next,
+      nextCount,
+      nextSupport,
+      id,
+      support,
+      0,
+      None.asInstanceOf[Option[Long]],
+      None.asInstanceOf[Option[Long]],
+      Map())
+  }
+
+  def update(qmer: MergedQmer,
+             contigId: Long,
+             contigScore: Double,
+             contigRank: Int): MergedQmer = {
+    new MergedQmer(qmer.id,
+      qmer.kmer,
+      qmer.multiplicity,
+      qmer.support,
+      qmer.next,
+      qmer.nextCount,
+      qmer.nextSupport,
+      contigId,
+      contigScore,
+      contigRank,
+      qmer.receiveIn,
+      qmer.receiveOut,
+      qmer.adjacentContigs)
+  }
+
+  def update(qmer: MergedQmer,
+             receive: Long,
+             in: Boolean): MergedQmer = {
+    val (receiveIn, receiveOut) = if (in) {
+      (Some(receive), qmer.receiveOut)
+    } else {
+      (qmer.receiveIn, Some(receive))
+    }
+
+    new MergedQmer(qmer.id,
+      qmer.kmer,
+      qmer.multiplicity,
+      qmer.support,
+      qmer.next,
+      qmer.nextCount,
+      qmer.nextSupport,
+      qmer.contigId,
+      qmer.contigScore,
+      qmer.contigRank,
+      receiveIn,
+      receiveOut,
+      qmer.adjacentContigs)
+  }
+
+  def update(qmer: MergedQmer,
+             adjacentContigs: Map[Long, Long]): MergedQmer = {
+    new MergedQmer(qmer.id,
+      qmer.kmer,
+      qmer.multiplicity,
+      qmer.support,
+      qmer.next,
+      qmer.nextCount,
+      qmer.nextSupport,
+      qmer.contigId,
+      qmer.contigScore,
+      qmer.contigRank,
+      qmer.receiveIn,
+      qmer.receiveOut,
+      adjacentContigs)
+  }
+
 }
 
 /**
@@ -92,32 +185,28 @@ object MergedQmer {
  * @param next Edge to next k-mer.
  * @param nextSupport Quality score supporting the edge.
  */
-class MergedQmer(val kmer: String,
-                 val multiplicity: Int,
-                 val support: Double,
-                 val next: Array[Char],
-                 val nextCount: Array[Int],
-                 val nextSupport: Array[Double]) extends Serializable {
+case class MergedQmer(id: Long,
+                      kmer: String,
+                      multiplicity: Int,
+                      support: Double,
+                      next: Array[Char],
+                      nextCount: Array[Int],
+                      nextSupport: Array[Double],
+                      contigId: Long,
+                      contigScore: Double,
+                      contigRank: Int,
+                      receiveIn: Option[Long],
+                      receiveOut: Option[Long],
+                      adjacentContigs: Map[Long, Long]) {
 
-  // the id of the contig this is in, if it is in any contig
-  var contigId: Option[Long] = None
-  var contigScore: Option[Double] = None
-
-  // the rank of this qmer in it's respective contig
-  var contigRank = 0
-
-  // the id of this qmer
-  lazy val id = generateKey()
-
-  // the list of IDs we can receive messages from
-  var receiveIn: Option[Long] = None
-  var receiveOut: Option[Long] = None
-
-  // have we been updated this turn?
-  var updated = false
-
-  // map of contigs we can connect to
-  val adjacentContigs = HashMap[Long, Long]()
+  /**
+   * Returns the ID of this qmer, it's kmer, and it's connections.
+   *
+   * @return A string describing the qmer.
+   */
+  override def toString(): String = {
+    id + ": " + kmer + next.foldLeft("[")(_ + _) + "] on " + contigId
+  }
 
   /**
    * Updates the adjacent contig map with a message from a sender.
@@ -125,8 +214,8 @@ class MergedQmer(val kmer: String,
    * @param id Contig ID.
    * @param sender Sender ID.
    */
-  def updateAdjacentContig(id: Long, sender: Long) {
-    adjacentContigs(sender) = id
+  def updateAdjacentContig(id: Long, sender: Long): MergedQmer = {
+    MergedQmer.update(this, adjacentContigs.filter(kv => kv._1 != sender) + (sender -> id))
   }
 
   /**
@@ -139,18 +228,13 @@ class MergedQmer(val kmer: String,
   }
 
   /**
-   * Has this qmer been added to a contig?
-   */
-  def partOfAContig: Boolean = contigId.isDefined
-
-  /**
    * Adds a message sending node to the set of acceptable senders.
    * Performs this for an in edge.
    *
    * @param id ID of the sending node.
    */
-  def acceptInMessage(id: Long) {
-    receiveIn = Some(id)
+  def acceptInMessage(id: Long): MergedQmer = {
+    MergedQmer.update(this, id, true)
   }
 
   /**
@@ -159,8 +243,8 @@ class MergedQmer(val kmer: String,
    *
    * @param id ID of the sending node.
    */
-  def acceptOutMessage(id: Long) {
-    receiveOut = Some(id)
+  def acceptOutMessage(id: Long): MergedQmer = {
+    MergedQmer.update(this, id, false)
   }
 
   /**
@@ -178,33 +262,11 @@ class MergedQmer(val kmer: String,
    *
    * @param id Hash ID to set.
    * @param score Score to set.
-   *
-   * @note This function sets the updated flag.
    */
   def setContig(id: Long,
                 score: Double,
-                rank: Int) {
-    updated = true
-    contigId = Some(id)
-    contigScore = Some(score)
-    contigRank = rank
-  }
-
-  /**
-   * Checks to see if this qmer has been updated. Clears the updated flag
-   * after checking.
-   *
-   * @return Returns true if this qmer has been updated.
-   */
-  def wasUpdated(): Boolean = {
-    // get flag
-    val wasUpdated = updated
-
-    // clear flag
-    updated = false
-
-    // return value before clearing
-    wasUpdated
+                rank: Int): MergedQmer = {
+    MergedQmer.update(this, id, score, rank)
   }
 
   /**
@@ -216,8 +278,7 @@ class MergedQmer(val kmer: String,
    * belong to a contig.
    */
   def getContig(): (Long, Double, Int) = {
-    assert(contigId.isDefined, "Cannot get contig until qmer joins a contig")
-    (contigId.get, contigScore.get, contigRank)
+    (contigId, contigScore, contigRank)
   }
 
   /**
@@ -226,16 +287,6 @@ class MergedQmer(val kmer: String,
    * @return Returns the rank of this qmer in it's respective contig.
    */
   def getRank(): Int = contigRank
-
-  /**
-   * Generates the ID of this q-mer, which is generated from the first 32 characters
-   * of the q-mer's k-mer.
-   *
-   * @return Returns the q-mer ID.
-   */
-  protected def generateKey(): Long = {
-    NucleotideSequenceHash.hashSequence(kmer)
-  }
 
   /**
    * Gets the ID of this q-mer, which is generated from the first 32 characters
@@ -268,7 +319,7 @@ class MergedQmer(val kmer: String,
       val destId = NucleotideSequenceHash.hashSequence(nextQmerPrefix + next(i))
 
       // build a new edge
-      array(i) = Edge(srcId, destId, QmerAdjacency(nextCount(i)))
+      array(i) = Edge(srcId, destId, QmerAdjacency(nextCount(i), true))
     })
 
     // return filled array

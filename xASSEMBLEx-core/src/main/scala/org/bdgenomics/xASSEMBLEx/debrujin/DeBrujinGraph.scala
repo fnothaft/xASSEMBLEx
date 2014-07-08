@@ -29,6 +29,7 @@ import org.apache.spark.graphx.{
 import org.apache.spark.rdd.RDD
 import org.bdgenomics.xASSEMBLEx.contig.{ ContigBuilder, IntermediateContig }
 import scala.annotation.tailrec
+import scala.math.abs
 
 object DeBrujinGraph {
 
@@ -49,8 +50,9 @@ object DeBrujinGraph {
     // unpersist rdd
     rdd.unpersist()
 
-    // build graph
-    new DeBrujinGraph(Graph(vertices, edges))
+    // build graph, and filter out edges without nodes on both ends
+    new DeBrujinGraph(Graph(vertices, edges)
+      .subgraph(et => et.srcAttr != null && et.dstAttr != null))
   }
 }
 
@@ -105,6 +107,27 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
       }
     }
 
+    object AdjacencyMessage {
+      /**
+       * Creates an empty adjacency message.
+       *
+       * @return Returns an empty adjacency message.
+       */
+      def apply(): AdjacencyMessage = {
+        new AdjacencyMessage(None.asInstanceOf[Option[Long]])
+      }
+
+      /**
+       * Creates a populated adjacency message.
+       *
+       * @param id ID to populate the message with.
+       * @return Returns a populated message.
+       */
+      def apply(id: Long): AdjacencyMessage = {
+        new AdjacencyMessage(Some(id))
+      }
+    }
+
     /**
      * Message passed when labeling nodes that are OK to receive messages from.
      *
@@ -118,46 +141,54 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
        * @param msg Message to merge.
        * @return Returns a new message.
        */
-      def merge(msg: AdjacencyMessage): AdjacencyMessage = AdjacencyMessage(None)
+      def merge(msg: AdjacencyMessage): AdjacencyMessage = {
+        AdjacencyMessage(None)
+      }
+
+      override def toString(): String = id.toString
     }
 
     /**
      * Updates a q-mer with a received message. Changes the contig ID of the q-mer
      * if there is an acceptable message with a higher contig score.
      *
-     * @param id The ID of the q-mer.
+     * @param vid The ID of the q-mer.
      * @param qmer The q-mer to update.
      * @param msg The message to update.
      * @return Returns this qmer, possibly with a new contig ID.
      */
-    def updateQmers(id: VertexId,
+    def updateQmers(vid: VertexId,
                     qmer: MergedQmer,
                     msg: LabelingMessage): MergedQmer = {
+      // get the score of this qmer's current contig
+      val (cScore, cId) = if (qmer != null) {
+        (qmer.getContig._2, qmer.getContig._1)
+      } else {
+        (0.0, 0L)
+      }
+
       @tailrec def updateIfAccepted(id: Iterator[Long],
                                     score: Iterator[Double],
                                     sender: Iterator[Long],
                                     rank: Iterator[Int],
-                                    qmer: MergedQmer) {
+                                    qmer: MergedQmer): MergedQmer = {
         // do we have more data?
-        if (id.hasNext) {
+        if (!id.hasNext) {
+          qmer
+        } else {
           val nId = id.next
           val nScore = score.next
           val nSender = sender.next
           val nRank = rank.next
 
+          val msg = "qmer " + vid + "/" + cScore + " in " + cId + " received (" + nId + "," + nScore + ") from " + nSender
+
           // if we can accept a message from this sender, and it has a better score
           // than our current score, we update
-          if (qmer.canAcceptMessageFrom(nSender)) {
-            if (qmer.getContig._2 < nScore) {
-              qmer.setContig(nId, nScore, nRank)
-            }
-          } else {
-            // update the adjacent contig mapping
-            qmer.updateAdjacentContig(nId, nSender)
-          }
+          val nQmer = qmer.setContig(nId, nScore, nRank)
 
           // call recursively
-          updateIfAccepted(id, score, sender, rank, qmer)
+          updateIfAccepted(id, score, sender, rank, nQmer)
         }
       }
 
@@ -167,9 +198,6 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
         msg.messageSender.toIterator,
         msg.rank.toIterator,
         qmer)
-
-      // return our updated qmer
-      qmer
     }
 
     /**
@@ -181,48 +209,83 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
      * messages to, as well as the messages.
      */
     def sendMessage(et: EdgeTriplet[MergedQmer, QmerAdjacency]): Iterator[(VertexId, LabelingMessage)] = {
-      var msgList = List[(VertexId, LabelingMessage)]()
-
-      // did the source get updated?
-      if (et.srcAttr.wasUpdated()) {
-        val contig = et.srcAttr.getContig
-        msgList = (et.dstId, LabelingMessage(List(contig._1),
-          List(contig._2),
-          List(et.srcId),
-          List(contig._3 - 1))) :: msgList
+      def fpEquals(a: Double, b: Double): Boolean = {
+        abs(a - b) < 1e-6
       }
 
-      // did the sink get updated?
-      if (et.dstAttr.wasUpdated()) {
-        val contig = et.dstAttr.getContig
-        msgList = (et.srcId, LabelingMessage(List(contig._1),
-          List(contig._2),
-          List(et.dstId),
-          List(contig._3 + 1))) :: msgList
+      // if we can't send messages to each other, let's not
+      if (et.attr.sendOnEdge) {
+        return Iterator()
+      }
+
+      // if we have a long repeat, a qmer may try to send to itself repeatedly
+      // this can trigger infinite messaging, which has a bad impact on runtime ;)
+      // so, let's avoid that by returning early
+      if (et.srcId == et.dstId) {
+        log.warn("Qmer " + et.srcId + " is trying to send messages to itself.")
+        return Iterator()
+      }
+
+      // get contig stats
+      val srcContig = et.srcAttr.getContig
+      val dstContig = et.dstAttr.getContig
+
+      if (srcContig._1 == dstContig._1) {
+        // don't send a message to yourself - see infinite messaging comment above
+        return Iterator()
+      }
+
+      // which contig has a higher score?
+      val (recepientVertexId,
+        contigId,
+        contigScore,
+        senderId,
+        recipientRank) = if (fpEquals(srcContig._2, dstContig._2)) {
+        if (srcContig._1 > dstContig._1) {
+          (et.dstId, srcContig._1, srcContig._2, et.srcId, srcContig._3 + 1)
+        } else {
+          (et.srcId, dstContig._1, dstContig._2, et.dstId, dstContig._3 - 1)
+        }
+      } else if (srcContig._2 > dstContig._2) {
+        (et.dstId, srcContig._1, srcContig._2, et.srcId, srcContig._3 + 1)
+      } else {
+        (et.srcId, dstContig._1, dstContig._2, et.dstId, dstContig._3 - 1)
       }
 
       // convert to iterator and return
-      msgList.toIterator
+      Iterator((recepientVertexId, LabelingMessage(List(contigId),
+        List(contigScore),
+        List(senderId),
+        List(recipientRank))))
     }
 
     // run two iterations of pregel to find allowable id's
-    val inGraph = Pregel[MergedQmer, QmerAdjacency, AdjacencyMessage](graph, AdjacencyMessage(None), 1, EdgeDirection.In)(
+    val inGraph = Pregel[MergedQmer, QmerAdjacency, AdjacencyMessage](graph, AdjacencyMessage(), 1, EdgeDirection.In)(
       (vid: VertexId, qmer: MergedQmer, msg: AdjacencyMessage) => {
-        msg.id.foreach(qmer.acceptInMessage)
-        qmer
+        msg.id.foldLeft(qmer)(_.acceptInMessage(_))
       }, (et: EdgeTriplet[MergedQmer, QmerAdjacency]) => {
-        Iterator((et.dstId, AdjacencyMessage(Some(et.srcId))))
+        Iterator((et.dstId, AdjacencyMessage(et.srcId)))
       }, _.merge(_))
-    val outGraph = Pregel[MergedQmer, QmerAdjacency, AdjacencyMessage](inGraph, AdjacencyMessage(None), 1, EdgeDirection.Out)(
+    val outGraph = Pregel[MergedQmer, QmerAdjacency, AdjacencyMessage](inGraph, AdjacencyMessage(), 1, EdgeDirection.Out)(
       (vid: VertexId, qmer: MergedQmer, msg: AdjacencyMessage) => {
-        msg.id.foreach(qmer.acceptInMessage)
-        qmer
+        msg.id.foldLeft(qmer)(_.acceptOutMessage(_))
       }, (et: EdgeTriplet[MergedQmer, QmerAdjacency]) => {
-        Iterator((et.srcId, AdjacencyMessage(Some(et.dstId))))
+        Iterator((et.srcId, AdjacencyMessage(et.dstId)))
       }, _.merge(_))
 
+    // map over edge triplets
+    val finalGraph = outGraph.mapTriplets((_, iter) => iter.map(et => {
+      if (et.dstAttr != null && et.dstAttr.receiveIn.isDefined) {
+        QmerAdjacency(et.attr.readsCovering,
+          true)
+      } else {
+        QmerAdjacency(et.attr.readsCovering,
+          false)
+      }
+    }))
+
     // pregel the graph up for some old school contiggin' action
-    Pregel[MergedQmer, QmerAdjacency, LabelingMessage](outGraph, LabelingMessage(List(),
+    Pregel[MergedQmer, QmerAdjacency, LabelingMessage](finalGraph, LabelingMessage(List(),
       List(),
       List(),
       List()))(
@@ -239,8 +302,8 @@ class DeBrujinGraph(graph: Graph[MergedQmer, QmerAdjacency]) extends Serializabl
    */
   def buildContigs(): RDD[IntermediateContig] = {
     labeledGraph.vertices
-      .map(kv => kv._2)
-      .groupBy(_.key)
+      .flatMap(kv => Option(kv._2))
+      .groupBy(_.getContig._1)
       .map(kv => ContigBuilder(kv._1, kv._2))
   }
 }

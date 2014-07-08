@@ -29,6 +29,7 @@ object ContigBuilder extends Serializable {
    * @return Returns an intermediate contig.
    */
   def apply(id: Long, qmers: Iterable[MergedQmer]): IntermediateContig = {
+
     // put qmers into sort order
     val sortedQmers = qmers.toSeq.sortBy(_.getRank)
 
@@ -38,28 +39,30 @@ object ContigBuilder extends Serializable {
 
     @tailrec def buildContigString(iter: Iterator[MergedQmer],
                                    cl: List[Char]): List[Char] = {
-      assert(iter.hasNext,
-        "Iterator has terminated early... Expect non-singular continuation before end of iterator.")
-
-      // get next qmer
-      val qmer = iter.next
-
-      // do we only have one possible continuation? if so, recurse, else return
-      if (qmer.next.length != 1) {
-        assert(!iter.hasNext,
-          "We should have run out of q-mers, but we have not.")
-
+      if (!iter.hasNext) {
         // we've been building our string in reverse, so we need to reverse now
         cl.reverse
       } else {
-        buildContigString(iter, qmer.next(0) :: cl)
+        // get next qmer
+        val qmer = iter.next
+
+        // do we only have one possible continuation? if so, recurse, else return
+        if (qmer.next.length != 1) {
+          assert(!iter.hasNext,
+            "We should have run out of q-mers, but we have not.")
+
+          // we've been building our string in reverse, so we need to reverse now
+          cl.reverse
+        } else {
+          buildContigString(iter, qmer.next(0) :: cl)
+        }
       }
     }
 
     // build contig string
     val contigString = buildContigString(sortedQmers.toIterator,
       sortedQmers.head.kmer.toList.reverse)
-      .toString
+      .foldLeft("")(_ + _.toString)
 
     // emit intermediate contig
     IntermediateContig(id, contigString, headAdjacentContigs, tailAdjacentContigs)

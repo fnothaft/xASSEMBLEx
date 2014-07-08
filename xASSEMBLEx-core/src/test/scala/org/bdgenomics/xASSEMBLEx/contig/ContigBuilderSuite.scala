@@ -15,15 +15,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.bdgenomics.xASSEMBLEx.debrujin
+package org.bdgenomics.xASSEMBLEx.contig
 
-/**
- * An edge connecting two qmers.
- *
- * @param readsCovering The number of reads that cover this edge.
- * @param readPairsCovering The number of read pairs that cover this edge.
- */
-case class QmerAdjacency(readsCovering: Int,
-                         sendOnEdge: Boolean,
-                         readPairsCovering: Int = 0) {
+import org.bdgenomics.adam.util.SparkFunSuite
+import org.bdgenomics.formats.avro.ADAMRecord
+import org.bdgenomics.xASSEMBLEx.debrujin.{ DeBrujinGraph, MergedQmer }
+import org.bdgenomics.xASSEMBLEx.reads.ProcessReads
+
+class ContigBuilderSuite extends SparkFunSuite {
+
+  sparkTest("reconstruct a single read into a contig") {
+    val readSequence = "ACCCTGCGGCTCA"
+
+    val read = ADAMRecord.newBuilder()
+      .setSequence(readSequence)
+      .setQual(".............")
+      .build()
+
+    val qmerRdd = ProcessReads(sc.parallelize(Seq(read)), 7)
+
+    val graph = DeBrujinGraph(qmerRdd)
+    val contigRdd = graph.buildContigs()
+
+    assert(contigRdd.count === 1)
+    assert(contigRdd.first.fragment === readSequence)
+  }
+
 }
