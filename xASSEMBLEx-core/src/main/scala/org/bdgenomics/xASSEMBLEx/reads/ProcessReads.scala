@@ -72,7 +72,7 @@ private[reads] class ProcessReads extends Serializable {
         val q = w.map(_._2)
 
         // reduce bases into string, reduce quality scores
-        Qmer(b.dropRight(1).map(_.toString).reduce(_ + _),
+        Qmer(b.dropRight(1).foldLeft("")(_ + _),
           q.dropRight(1).reduce(_ * _),
           b.last,
           q.last)

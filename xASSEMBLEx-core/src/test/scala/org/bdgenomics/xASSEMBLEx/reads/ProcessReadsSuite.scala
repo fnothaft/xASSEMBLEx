@@ -15,15 +15,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.bdgenomics.xASSEMBLEx.debrujin
+package org.bdgenomics.xASSEMBLEx.reads
 
-/**
- * An edge connecting two qmers.
- *
- * @param readsCovering The number of reads that cover this edge.
- * @param readPairsCovering The number of read pairs that cover this edge.
- */
-case class QmerAdjacency(readsCovering: Int,
-                         sendOnEdge: Boolean,
-                         readPairsCovering: Int = 0) {
+import org.bdgenomics.formats.avro.ADAMRecord
+import org.scalatest.FunSuite
+
+class ProcessReadsSuite extends FunSuite {
+
+  test("cut a read into qmers") {
+    val read = ADAMRecord.newBuilder()
+      .setSequence("ACTGC")
+      .setQual(".....")
+      .build()
+
+    val pr = new ProcessReads
+    val qmers = pr.readToQmers(read, 4)
+
+    assert(qmers.hasNext)
+    val qmer = qmers.next
+    assert(qmer.kmer === "ACTG")
+    assert(qmer.next === 'C')
+    assert(!qmers.hasNext)
+  }
+
 }

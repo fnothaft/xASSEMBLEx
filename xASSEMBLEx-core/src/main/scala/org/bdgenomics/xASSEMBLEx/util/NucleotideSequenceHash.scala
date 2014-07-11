@@ -22,6 +22,22 @@ import scala.annotation.tailrec
 object NucleotideSequenceHash {
 
   /**
+   * Hashes a char.
+   *
+   * @param c Char to hash.
+   * @return Returns a long.
+   *
+   * @throws IllegalArgumentException Exception thrown if letter is not in {A,C,G,T,U}.
+   */
+  def hashChar(c: Char): Long = c match {
+    case 'A'       => 0L
+    case 'C'       => 1L
+    case 'G'       => 2L
+    case 'T' | 'U' => 3L
+    case _         => throw new IllegalArgumentException("Saw non-nucleotide letter (" + c + ").")
+  }
+
+  /**
    * Hashes a sequence of nucleotides into a 64 bit long.
    *
    * @param sequence Nucleotide sequence to hash.
@@ -35,13 +51,7 @@ object NucleotideSequenceHash {
       if (!iter.hasNext) {
         hash
       } else {
-        val newHash = 4L * hash + iter.next match {
-          case 'A'       => 0L
-          case 'C'       => 1L
-          case 'G'       => 2L
-          case 'T' | 'U' => 3L
-          case _         => throw new IllegalArgumentException("Saw non-nucleotide letter.")
-        }
+        val newHash = 4L * hash + hashChar(iter.next)
         hashHelper(iter, newHash)
       }
     }
