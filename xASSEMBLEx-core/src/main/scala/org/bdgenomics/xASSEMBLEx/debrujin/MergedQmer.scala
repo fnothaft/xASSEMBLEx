@@ -115,10 +115,18 @@ object MergedQmer {
       Map())
   }
 
-  def update(qmer: MergedQmer,
-             contigId: Long,
-             contigScore: Double,
-             contigRank: Int): MergedQmer = {
+  /**
+   * Updates the contig membership of a single qmer.
+   *
+   * @param qmer Qmer to update.
+   * @param contigId The new contig ID to take on.
+   * @param contigScore The score of the new contig.
+   * @param contigRank The rank of the qmer in this contig.
+   */
+  private[debrujin] def update(qmer: MergedQmer,
+                               contigId: Long,
+                               contigScore: Double,
+                               contigRank: Int): MergedQmer = {
     new MergedQmer(qmer.id,
       qmer.kmer,
       qmer.multiplicity,
@@ -134,6 +142,14 @@ object MergedQmer {
       qmer.adjacentContigs)
   }
 
+  /**
+   * Updates a qmer to note that it can receive updates from another qmer.
+   *
+   * @param qmer Q-mer to update.
+   * @param receive Node to receive from.
+   * @param in Direction; true = in, false = out.
+   * @return Updated qmer.
+   */
   def update(qmer: MergedQmer,
              receive: Long,
              in: Boolean): MergedQmer = {
@@ -158,6 +174,13 @@ object MergedQmer {
       qmer.adjacentContigs)
   }
 
+  /**
+   * Updates a q-mer with the contigs that it is adjacent to.
+   *
+   * @param qmer Q-mer to update.
+   * @param adjacentContigs The contigs adjacent to this q-mer.
+   * @return Updated q-mer.
+   */
   def update(qmer: MergedQmer,
              adjacentContigs: Map[Long, Long]): MergedQmer = {
     new MergedQmer(qmer.id,
@@ -198,6 +221,10 @@ case class MergedQmer(id: Long,
                       receiveIn: Option[Long],
                       receiveOut: Option[Long],
                       adjacentContigs: Map[Long, Long]) {
+
+  def toDot(): String = {
+    id + " [\nlabel = \"" + kmer + "\"\nshape = box\n];"
+  }
 
   /**
    * Returns the ID of this qmer, it's kmer, and it's connections.
